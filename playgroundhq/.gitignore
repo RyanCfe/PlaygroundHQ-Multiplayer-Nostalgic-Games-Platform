@@ -1,0 +1,11 @@
+node_modules/
+.env
+logs/
+*.log
+.DS_Store
+dist/
+serviceAccountKey.json
+*.key
+node_modules
+config/serviceAccountKey.json
+playgroundhq/config/playgroundhq1-754f1-firebase-adminsdk-fbsvc-764900503d.json
