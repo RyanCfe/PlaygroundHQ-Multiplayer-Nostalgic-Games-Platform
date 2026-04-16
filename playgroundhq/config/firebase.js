@@ -10,7 +10,17 @@ function initFirebase() {
   if (initialized) return { db, auth, isMock };
 
   try {
-    const serviceAccount = require('./serviceAccountKey.json');
+    const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
+      ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+      : null;
+
+    if (!serviceAccount) {
+      throw new Error('FIREBASE_SERVICE_ACCOUNT is missing');
+    }
+
+    if (serviceAccount.private_key) {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
 
     if (!admin.apps.length) {
       admin.initializeApp({
@@ -35,7 +45,6 @@ function initFirebase() {
   return { db, auth, isMock };
 }
 
-// ── Mock Firestore for local dev without credentials ──────────────────────────
 function createMockFirestore() {
   const store = {};
 
