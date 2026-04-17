@@ -25,22 +25,53 @@ function initSocket(io) {
         if (!gameId) return cb?.({ error: 'gameId required' });
 
         const playerId = socket.data.userId || socket.id;
+
+        // Bot rooms should be human + bot
+        const effectiveMaxPlayers = botDifficulty ? 2 : (maxPlayers || 2);
+
         const room = createRoom({
           gameId,
           hostId: playerId,
           hostName: playerName || 'Host',
-          maxPlayers: maxPlayers || 2,
+          maxPlayers: effectiveMaxPlayers,
           isPrivate: !!isPrivate,
           botDifficulty: botDifficulty || null,
         });
 
         // Update host socketId
         room.players[0].socketId = socket.id;
+        room.players[0].ready = true; // host is ready immediately
         playerRoom.set(socket.id, room.code);
         socket.join(room.code);
 
-        cb?.({ room: sanitizeRoom(room, playerId) });
         logger.info(`Room ${room.code} created by ${playerId}`);
+
+        // If bot mode is enabled, auto-start immediately.
+        // roomManager.startGame() already injects the bot if needed.
+        if (botDifficulty) {
+          const started = startGame(room.code);
+          if (started.error) {
+            return cb?.({ error: started.error });
+          }
+
+          const sanitized = sanitizeRoom(started.room, playerId);
+          const clientState = getClientState(started.room, playerId);
+
+          cb?.({
+            room: sanitized,
+            gameStarted: true,
+            state: clientState,
+          });
+
+          io.to(room.code).emit('game:started', {
+            state: clientState,
+          });
+
+          scheduleBotMove(io, room.code);
+          return;
+        }
+
+        cb?.({ room: sanitizeRoom(room, playerId) });
       } catch (err) {
         logger.error('room:create error', err);
         cb?.({ error: 'Failed to create room' });
@@ -53,7 +84,11 @@ function initSocket(io) {
         if (!code) return cb?.({ error: 'Room code required' });
 
         const playerId = socket.data.userId || socket.id;
-        const result = joinRoom(code, { playerId, playerName: playerName || 'Guest', socketId: socket.id });
+        const result = joinRoom(code, {
+          playerId,
+          playerName: playerName || 'Guest',
+          socketId: socket.id,
+        });
 
         if (result.error) return cb?.({ error: result.error });
         socket.join(code);
@@ -67,11 +102,13 @@ function initSocket(io) {
           playerCount: room.players.length,
         });
 
-        // Auto-start if full (for 2-player games)
+        // Auto-start if full
         if (room.players.length >= room.maxPlayers && room.status === 'waiting') {
           const started = startGame(code);
           if (!started.error) {
-            io.to(code).emit('game:started', { state: getClientState(started.room, null) });
+            io.to(code).emit('game:started', {
+              state: getClientState(started.room, null),
+            });
             scheduleBotMove(io, code);
           }
         }
@@ -102,7 +139,9 @@ function initSocket(io) {
       if (room.players.every(p => p.ready) && room.players.length >= 2) {
         const started = startGame(code);
         if (!started.error) {
-          io.to(code).emit('game:started', { state: getClientState(started.room, null) });
+          io.to(code).emit('game:started', {
+            state: getClientState(started.room, null),
+          });
           scheduleBotMove(io, code);
         }
       }
@@ -119,7 +158,9 @@ function initSocket(io) {
       const result = startGame(code);
       if (result.error) return cb?.({ error: result.error });
 
-      io.to(code).emit('game:started', { state: getClientState(result.room, null) });
+      io.to(code).emit('game:started', {
+        state: getClientState(result.room, null),
+      });
       scheduleBotMove(io, code);
       cb?.({ ok: true });
     });
@@ -151,7 +192,6 @@ function initSocket(io) {
         const room = result.room;
         const state = result.state;
 
-        // Emit state update to all in room
         io.to(code).emit('game:state_update', {
           state: getClientState(room, null),
           lastMove: { playerId, move },
@@ -163,7 +203,6 @@ function initSocket(io) {
             finalState: state,
           });
         } else {
-          // Schedule bot move if it's a bot's turn
           scheduleBotMove(io, code, 800);
         }
 
@@ -174,17 +213,24 @@ function initSocket(io) {
       }
     });
 
-    // Memory match unlock (flip-back animation done)
+    // Memory match unlock
     socket.on('game:unlock', (data, cb) => {
       const { code } = data || {};
       const room = getRoom(code);
       if (!room) return cb?.({ error: 'Room not found' });
+
       const engine = getEngine(room.gameId);
       if (!engine.processUnlock) return cb?.({ error: 'Engine has no unlock' });
+
       const result = engine.processUnlock(room.gameState);
       if (result.error) return cb?.({ error: result.error });
+
       room.gameState = result.state;
       io.to(code).emit('game:state_update', { state: room.gameState });
+
+      // If unlock hands turn to bot, let bot move
+      scheduleBotMove(io, code, 600);
+
       cb?.({ ok: true });
     });
 
@@ -193,8 +239,10 @@ function initSocket(io) {
       const playerId = socket.data.userId || socket.id;
       const room = getRoom(code);
       if (!room) return cb?.({ error: 'Room not found' });
+
       const engine = getEngine(room.gameId);
       if (!engine.getValidMoves) return cb?.({ moves: [] });
+
       const moves = engine.getValidMoves(room.gameState, playerId);
       cb?.({ moves });
     });
@@ -206,19 +254,26 @@ function initSocket(io) {
       if (!room) return cb?.({ error: 'Room not found' });
       if (room.status !== 'finished') return cb?.({ error: 'Game not finished' });
 
-      // Vote system: track who wants rematch
       if (!room.rematchVotes) room.rematchVotes = new Set();
       room.rematchVotes.add(playerId);
-      io.to(code).emit('game:rematch_vote', { playerId, count: room.rematchVotes.size, needed: room.players.filter(p => !p.isBot).length });
+
+      io.to(code).emit('game:rematch_vote', {
+        playerId,
+        count: room.rematchVotes.size,
+        needed: room.players.filter(p => !p.isBot).length,
+      });
 
       if (room.rematchVotes.size >= room.players.filter(p => !p.isBot).length) {
         room.rematchVotes.clear();
         const result = resetGame(code);
         if (!result.error) {
-          io.to(code).emit('game:started', { state: getClientState(result.room, null) });
+          io.to(code).emit('game:started', {
+            state: getClientState(result.room, null),
+          });
           scheduleBotMove(io, code);
         }
       }
+
       cb?.({ ok: true });
     });
 
@@ -227,14 +282,17 @@ function initSocket(io) {
     socket.on('chat:message', (data, cb) => {
       const { code, message } = data || {};
       if (!message?.trim()) return cb?.({ error: 'Empty message' });
+
       const playerId = socket.data.userId || socket.id;
       const room = getRoom(code);
       const player = room?.players.find(p => p.id === playerId);
+
       const msg = addChatMessage(code, {
         playerId,
         playerName: player?.name || 'Guest',
         message: message.trim(),
       });
+
       if (msg) {
         io.to(code).emit('chat:message', msg);
         cb?.({ ok: true });
@@ -262,10 +320,10 @@ function initSocket(io) {
           playerName: result.player?.name,
         });
       }
+
       logger.info(`Socket disconnected: ${socket.id} [online: ${onlineCount}]`);
     });
 
-    // ── PING ─────────────────────────────────────────────────────────────────
     socket.on('ping', (cb) => cb?.({ time: Date.now(), online: onlineCount }));
   });
 
@@ -278,6 +336,7 @@ const botTimers = new Map();
 
 function scheduleBotMove(io, code, delayMs = 1200) {
   if (botTimers.has(code)) return;
+
   const room = getRoom(code);
   if (!room || room.status !== 'playing') return;
 
@@ -304,10 +363,15 @@ async function executeBotMove(io, code, botPlayer) {
 
   try {
     const move = engine.getBotMove(room.gameState, botPlayer.difficulty || 'medium');
-    if (!move && move !== 0) return;
+    if (move === null || move === undefined) return;
 
-    // For ludo/games where move is an object
-    const moveObj = typeof move === 'object' ? move : { index: move, col: move };
+    let moveObj;
+    if (typeof move === 'object') {
+      moveObj = move;
+    } else {
+      // map primitive bot outputs to expected engine input
+      moveObj = { index: move, col: move, pit: move, cardIndex: move, letter: move };
+    }
 
     const result = processMove(code, moveObj, botPlayer.id);
     if (result.error) {
@@ -321,7 +385,10 @@ async function executeBotMove(io, code, botPlayer) {
     });
 
     if (result.state?.status === 'finished') {
-      io.to(code).emit('game:finished', { winner: result.state.winner, finalState: result.state });
+      io.to(code).emit('game:finished', {
+        winner: result.state.winner,
+        finalState: result.state,
+      });
     } else {
       scheduleBotMove(io, code, 1000);
     }
@@ -355,15 +422,19 @@ function sanitizeRoom(room, playerId) {
 function getClientState(roomOrState, playerId) {
   const state = roomOrState?.gameState || roomOrState;
   if (!state) return null;
+
   const s = structuredClone(state);
-  // Remove hidden info (word, secret code, etc.)
+
+  // Remove hidden info
   if ('word' in s && s.status !== 'finished') delete s.word;
   if ('secret' in s && s.status !== 'finished') delete s.secret;
-  // Hide opponent boards in battleship
+
+  // Hide opponent boards in battleship only when we know the requesting player
   if (s.boards && playerId) {
     const opp = s.players?.find(p => p !== playerId);
     if (opp && s.boards[opp]) s.boards[opp] = null;
   }
+
   return s;
 }
 
