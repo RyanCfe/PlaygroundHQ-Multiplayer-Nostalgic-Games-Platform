@@ -976,6 +976,7 @@ let activeGenre = 'all', activeTag = null, activePlayers = 'any', activeSort = '
 let currentUser = null, firebaseUser = null;
 let socket = null;
 let currentRoom = null, currentRoomCode = null, currentGameId = null;
+let hasAutoReadiedCurrentRoom = false;
 let pendingBotDifficulty = null;
 let selectedPc = 2;
 
@@ -1154,7 +1155,8 @@ function connectSocket() {
   });
 
   socket.on('game:started', ({ state }) => {
-    showGameRoom();
+    closeModal('codeModal');
+    showGameRoom(true);
     updateGameState(state);
     toast('Game started! 🎮', 'success');
   });
@@ -1428,9 +1430,19 @@ function doCreateRoom() {
     currentRoom = res.room;
     currentRoomCode = res.room.code;
     currentGameId = gameId;
+    hasAutoReadiedCurrentRoom = !!botDiff;
 
     document.getElementById('displayCode').textContent = res.room.code;
-    renderWaitingSlots(res.room.players, selectedPc);
+
+    if (res.gameStarted && res.state) {
+      closeModal('codeModal');
+      showGameRoom(true);
+      updateGameState(res.state);
+      toast('Bot game ready!', 'success');
+      return;
+    }
+
+    renderWaitingSlots(res.room.players, res.room.maxPlayers || selectedPc);
     openModal('codeModal');
   });
 }
@@ -1454,9 +1466,12 @@ function quickJoin(code, name = defaultPlayerName()) {
     currentRoom = res.room;
     currentRoomCode = code;
     currentGameId = res.room.gameId;
+    hasAutoReadiedCurrentRoom = res.room.status === 'playing';
 
     if (res.room.status === 'playing') {
-      enterRoom();
+      closeModal('codeModal');
+      showGameRoom(true);
+      toast('Joined room ' + code + '!', 'success');
     } else {
       toast('Joined room ' + code + '!', 'success');
       openModal('codeModal');
@@ -1492,10 +1507,13 @@ function copyCode() {
 function enterRoom() {
   closeModal('codeModal');
   showGameRoom();
-  if (currentRoomCode) socket.emit('room:ready', { code: currentRoomCode }, () => {});
+  if (currentRoomCode && !hasAutoReadiedCurrentRoom) {
+    hasAutoReadiedCurrentRoom = true;
+    socket.emit('room:ready', { code: currentRoomCode }, () => {});
+  }
 }
 
-function showGameRoom() {
+function showGameRoom(gameAlreadyStarted = false) {
   document.getElementById('game-room').classList.add('open');
   const g = allGames.find(x => x.id === currentGameId) || {};
   document.getElementById('grGameName').textContent = g.name || 'Game';
@@ -1503,7 +1521,7 @@ function showGameRoom() {
   document.getElementById('gpIcon').textContent = g.symbol || '🎮';
   document.getElementById('gpTitle').textContent = g.name || 'Game';
   document.getElementById('gpDesc').textContent = g.description || '';
-  document.getElementById('readyBtn').style.display = 'block';
+  document.getElementById('readyBtn').style.display = gameAlreadyStarted ? 'none' : 'block';
   document.getElementById('readyBtn').textContent = 'I\'m Ready ✓';
   document.getElementById('readyBtn').onclick = setReady;
   if (currentRoom) renderPlayerList(currentRoom.players);
@@ -1517,6 +1535,7 @@ function leaveRoom() {
   currentRoom = null;
   currentRoomCode = null;
   currentGameId = null;
+  hasAutoReadiedCurrentRoom = false;
 }
 
 function updateGameState(state) {
@@ -1527,11 +1546,136 @@ function updateGameState(state) {
   document.getElementById('turnText').textContent = isMyTurn ? 'Your Turn!' : `Waiting for ${getPlayerName(state.currentTurn)}`;
   document.getElementById('turnIndicator').style.borderColor = isMyTurn ? 'var(--coral)' : 'var(--border)';
 
-  if (state.players && currentRoom) {
+  if (currentRoom) {
     currentRoom.gameState = state;
-    renderPlayerList(currentRoom.players);
+    if (Array.isArray(state.players) && (!currentRoom.players || currentRoom.players.length === 0)) {
+      currentRoom.players = state.players.map(id => ({ id, name: getPlayerName(id) }));
+    }
+    renderPlayerList(currentRoom.players || []);
   }
+
+  renderGameBoard(state);
 }
+
+
+function sendMove(move) {
+  if (!currentRoomCode) return;
+  socket.emit('game:move', { code: currentRoomCode, move }, res => {
+    if (res?.error) toast(res.error, 'error');
+  });
+}
+
+function renderGameBoard(state) {
+  const root = document.getElementById('gamePlaceholder');
+  if (!root) return;
+
+  if (currentGameId === 'tictactoe' && Array.isArray(state.board)) {
+    renderTicTacToeBoard(root, state);
+    return;
+  }
+
+  if (currentGameId === 'connect4' && Array.isArray(state.board)) {
+    renderConnect4Board(root, state);
+    return;
+  }
+
+  renderFallbackState(root, state);
+}
+
+function renderTicTacToeBoard(root, state) {
+  const myId = getMyId();
+  const isMyTurn = state.currentTurn === myId && state.status === 'playing';
+  const winLine = Array.isArray(state.winLine) ? state.winLine : [];
+
+  root.innerHTML = `
+    <div style="width:min(92vw,420px);margin:0 auto;text-align:center">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px auto">
+        ${state.board.map((cell, i) => `
+          <button
+            type="button"
+            data-index="${i}"
+            style="
+              aspect-ratio:1;
+              border:2px solid ${winLine.includes(i) ? 'var(--teal)' : 'var(--border)'};
+              border-radius:18px;
+              background:white;
+              font:800 2.5rem var(--ff-b);
+              color:var(--navy);
+              cursor:${isMyTurn && !cell ? 'pointer' : 'default'};
+              box-shadow:var(--shadow);
+            "
+            ${!isMyTurn || cell || state.status !== 'playing' ? 'disabled' : ''}
+          >${cell || ''}</button>
+        `).join('')}
+      </div>
+      <div style="font-size:13px;font-weight:800;color:rgba(26,26,46,.55)">
+        ${state.status === 'finished'
+          ? (state.draw ? 'Draw game' : `${getPlayerName(state.winner)} wins`)
+          : (isMyTurn ? 'Tap a square to play' : 'Waiting for opponent')}
+      </div>
+    </div>
+  `;
+
+  root.querySelectorAll('button[data-index]').forEach(btn => {
+    btn.addEventListener('click', () => sendMove({ index: Number(btn.dataset.index) }));
+  });
+}
+
+function renderConnect4Board(root, state) {
+  const myId = getMyId();
+  const isMyTurn = state.currentTurn === myId && state.status === 'playing';
+  const cols = state.board[0]?.length || 7;
+  const rows = state.board.length || 6;
+
+  const colButtons = Array.from({ length: cols }, (_, col) => `
+    <button
+      type="button"
+      data-col="${col}"
+      style="
+        padding:8px 0;border:none;border-radius:10px;background:${isMyTurn ? 'var(--navy)' : 'rgba(26,26,46,.2)'};
+        color:white;font:800 12px var(--ff-b);cursor:${isMyTurn ? 'pointer' : 'default'};
+      "
+      ${!isMyTurn || state.status !== 'playing' ? 'disabled' : ''}
+    >↓</button>
+  `).join('');
+
+  const boardHtml = state.board.map(row => row.map(cell => {
+    const color = cell === 1 ? '#e03131' : cell === 2 ? '#f59f00' : 'white';
+    return `<div style="width:100%;aspect-ratio:1;border-radius:50%;background:${color};border:2px solid rgba(0,0,0,.08)"></div>`;
+  }).join('')).join('');
+
+  root.innerHTML = `
+    <div style="width:min(95vw,520px);margin:0 auto;text-align:center">
+      <div style="display:grid;grid-template-columns:repeat(${cols},1fr);gap:8px;margin-bottom:10px">${colButtons}</div>
+      <div style="display:grid;grid-template-columns:repeat(${cols},1fr);gap:8px;background:#1971c2;padding:12px;border-radius:20px;box-shadow:var(--shadow-lg)">
+        ${boardHtml}
+      </div>
+      <div style="margin-top:12px;font-size:13px;font-weight:800;color:rgba(26,26,46,.55)">
+        ${state.status === 'finished'
+          ? (state.draw ? 'Draw game' : `${getPlayerName(state.winner)} wins`)
+          : (isMyTurn ? 'Choose a column' : 'Waiting for opponent')}
+      </div>
+    </div>
+  `;
+
+  root.querySelectorAll('button[data-col]').forEach(btn => {
+    btn.addEventListener('click', () => sendMove({ col: Number(btn.dataset.col) }));
+  });
+}
+
+function renderFallbackState(root, state) {
+  const pretty = escHtml(JSON.stringify(state, null, 2));
+  const game = allGames.find(x => x.id === currentGameId) || {};
+  root.innerHTML = `
+    <div class="game-placeholder" style="width:min(92vw,680px)">
+      <span class="gp-icon">${game.symbol || '🎮'}</span>
+      <div class="gp-title">${escHtml(game.name || 'Game')}</div>
+      <div class="gp-desc">${escHtml(game.description || 'Game in progress')}</div>
+      <pre style="margin-top:16px;text-align:left;max-height:320px;overflow:auto;background:white;border:1.5px solid var(--border);border-radius:16px;padding:16px;font:700 12px/1.45 monospace;color:var(--navy)">${pretty}</pre>
+    </div>
+  `;
+}
+
 
 function renderPlayerList(players) {
   const myId = getMyId();

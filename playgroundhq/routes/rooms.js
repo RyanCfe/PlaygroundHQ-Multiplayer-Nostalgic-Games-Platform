@@ -21,9 +21,6 @@ router.post('/', optionalAuth, (req, res) => {
 
     const playerId = req.user?.uid || `guest_${Date.now()}`;
     const wantsBot = !!botDifficulty;
-
-    // If bot mode is selected, force it to 2 players:
-    // 1 human + 1 bot
     const effectiveMaxPlayers = wantsBot ? 2 : (maxPlayers || 2);
 
     const room = createRoom({
@@ -35,37 +32,19 @@ router.post('/', optionalAuth, (req, res) => {
       botDifficulty: botDifficulty || null,
     });
 
-    // Mark host ready automatically for bot rooms
-    if (wantsBot) {
-      if (room.players?.length > 0) {
-        room.players[0].ready = true;
-      }
-
-      // Add a simple bot player directly into the room
-      room.players.push({
-        id: `bot_${Date.now()}`,
-        name:
-          botDifficulty === 'easy'
-            ? 'Friendly Bot'
-            : botDifficulty === 'hard'
-            ? 'Expert Bot'
-            : 'Competitive Bot',
-        isBot: true,
-        ready: true,
-        difficulty: botDifficulty,
-      });
-
-      room.playerCount = room.players.length;
-
-      // Start game immediately
-      const gameState = startGame(room.code);
-      room.status = 'playing';
-      room.gameState = gameState;
+    if (room.players?.length > 0) {
+      room.players[0].ready = true;
     }
 
-    return res.status(201).json({
-      room: sanitize(room),
-    });
+    if (wantsBot) {
+      const started = startGame(room.code);
+      if (started.error) {
+        return res.status(400).json({ error: started.error });
+      }
+      return res.status(201).json({ room: sanitize(started.room) });
+    }
+
+    return res.status(201).json({ room: sanitize(room) });
   } catch (err) {
     console.error('POST /api/rooms failed:', err);
     return res.status(500).json({ error: 'Failed to create room' });

@@ -135,8 +135,18 @@ function initSocket(io) {
       io.to(code).emit('room:player_ready', { playerId });
       const room = result.room;
 
-      // Start if everyone's ready
-      if (room.players.every(p => p.ready) && room.players.length >= 2) {
+      // Start if all humans are ready.
+      const humanPlayers = room.players.filter(p => !p.isBot);
+      const allHumansReady = humanPlayers.every(p => p.ready);
+      const canStart =
+        allHumansReady &&
+        (
+          humanPlayers.length >= room.maxPlayers ||
+          (room.botDifficulty && humanPlayers.length >= 1) ||
+          room.players.length >= 2
+        );
+
+      if (canStart) {
         const started = startGame(code);
         if (!started.error) {
           io.to(code).emit('game:started', {
@@ -226,7 +236,7 @@ function initSocket(io) {
       if (result.error) return cb?.({ error: result.error });
 
       room.gameState = result.state;
-      io.to(code).emit('game:state_update', { state: room.gameState });
+      io.to(code).emit('game:state_update', { state: getClientState(room, null) });
 
       // If unlock hands turn to bot, let bot move
       scheduleBotMove(io, code, 600);

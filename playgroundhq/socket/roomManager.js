@@ -84,17 +84,23 @@ function startGame(code) {
   if (room.status !== 'waiting') return { error: 'Room not waiting' };
   if (room.players.length < 1) return { error: 'Not enough players' };
 
-  // Add bot if enabled and not enough human players
-  if (room.botDifficulty && room.players.length < room.maxPlayers) {
-    const botCount = room.maxPlayers - room.players.length;
-    for (let i = 0; i < botCount; i++) {
+  // Bot rooms should always start as at least 1 human + 1 bot.
+  if (room.botDifficulty) {
+    const targetPlayers = Math.max(2, room.maxPlayers || 2);
+    while (room.players.length < targetPlayers) {
       room.players.push({
         id: `bot_${uuidv4()}`,
         name: `Bot (${room.botDifficulty})`,
-        isBot: true, socketId: null, ready: true,
+        isBot: true,
+        socketId: null,
+        ready: true,
         difficulty: room.botDifficulty,
       });
     }
+  }
+
+  if (room.players.length < 2) {
+    return { error: 'Not enough players' };
   }
 
   const engine = getEngine(room.gameId);
@@ -149,8 +155,9 @@ function resetGame(code) {
   const room = getRoom(code);
   if (!room) return { error: 'Room not found' };
   const engine = getEngine(room.gameId);
-  const playerIds = room.players.filter(p => !p.isBot).map(p => p.id);
-  room.gameState = engine.createGame({ playerIds });
+  const playerIds = room.players.map(p => p.id);
+  room.players.forEach(p => { p.ready = !!p.isBot; });
+  room.gameState = engine.createGame({ playerIds, ...room.gameOptions });
   room.status = 'playing';
   return { room };
 }
