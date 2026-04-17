@@ -1019,8 +1019,6 @@ function initFirebaseAuth() {
         }
       }
     });
-
-    console.log('Firebase Auth initialized');
   } catch (e) {
     console.warn('Firebase Auth not configured — running in guest mode', e);
   }
@@ -1080,44 +1078,38 @@ async function signInGuest() {
 
 async function signInEmail() {
   const email = document.getElementById('authEmail').value.trim();
-  const pass = document.getElementById('authPassword').value;
+  const pass = document.getElementById('authPassword').value.trim();
   if (!email || !pass) return toast('Enter email and password', 'error');
 
   try {
+    await firebase.auth().signInWithEmailAndPassword(email, pass);
+  } catch {
     try {
-      await firebase.auth().signInWithEmailAndPassword(email, pass);
-    } catch {
       await firebase.auth().createUserWithEmailAndPassword(email, pass);
+    } catch (e) {
+      toast('Auth failed: ' + e.message, 'error');
+      return;
     }
-    closeModal('authModal');
-    toast('Signed in! 🎉', 'success');
-  } catch (e) {
-    toast(e.message, 'error');
   }
+  closeModal('authModal');
+  toast('Signed in!', 'success');
 }
 
 async function signOutUser() {
   try {
     await firebase.auth().signOut();
-    toast('Signed out', 'info');
+    toast('Signed out', 'success');
   } catch (e) {
-    console.warn('Sign out failed:', e);
-    currentUser = null;
-    updateAuthUI(null);
+    toast('Sign out failed', 'error');
   }
-  toggleUserMenu();
 }
 
 function toggleUserMenu() {
   document.getElementById('userMenu').classList.toggle('open');
 }
-
-document.addEventListener('click', e => {
+window.addEventListener('click', e => {
   const wrap = document.getElementById('userMenuWrap');
-  const menu = document.getElementById('userMenu');
-  if (wrap && menu && !wrap.contains(e.target)) {
-    menu.classList.remove('open');
-  }
+  if (wrap && !wrap.contains(e.target)) document.getElementById('userMenu')?.classList.remove('open');
 });
 
 function openProfile() { toggleUserMenu(); toast('Profile coming soon!', 'info'); }
@@ -1168,13 +1160,20 @@ function connectSocket() {
 
   socket.on('game:finished', ({ winner }) => {
     const myId = getMyId();
-    const msg = winner === myId ? '🏆 You won!' : winner === 'tie' ? '🤝 It\'s a tie!' : '😔 You lost';
+    const msg =
+      winner === myId ? '🏆 You won!' :
+      winner === 'tie' ? '🤝 It\'s a tie!' :
+      '😔 You lost';
+
     toast(msg, winner === myId ? 'success' : 'info');
     appendChat(msg, 'system');
+
     const btn = document.getElementById('readyBtn');
-    btn.style.display = 'block';
-    btn.textContent = '🔁 Rematch';
-    btn.onclick = openRematch;
+    if (btn) {
+      btn.style.display = 'block';
+      btn.textContent = '🔁 Rematch';
+      btn.onclick = openRematch;
+    }
   });
 
   socket.on('chat:message', msg => appendChat(msg.message, 'user', msg.playerName));
@@ -1213,116 +1212,107 @@ async function loadGames() {
 async function loadRooms() {
   try {
     const res = await fetch(`${API_BASE}/api/rooms`);
-    const { rooms } = await res.json();
-    renderRooms(rooms || []);
-    document.getElementById('statRooms').textContent = (rooms || []).length;
+    const data = await res.json();
+    renderRooms(data.rooms || []);
+    document.getElementById('statRooms').textContent = (data.rooms || []).length;
   } catch {
     renderRooms([]);
+    document.getElementById('statRooms').textContent = '0';
   }
-  setTimeout(loadRooms, 15000);
 }
 
 function setupFilters() {
   document.querySelectorAll('#genreRow .fpill').forEach(pill => {
     pill.addEventListener('click', () => {
-      if (pill.dataset.genre) {
-        document.querySelectorAll('#genreRow .fpill[data-genre]').forEach(p => p.classList.remove('active'));
+      const genre = pill.dataset.genre;
+      const tag = pill.dataset.tag;
+
+      if (genre) {
+        document.querySelectorAll('#genreRow .fpill[data-genre]').forEach(x => x.classList.remove('active'));
         pill.classList.add('active');
-        activeGenre = pill.dataset.genre;
+        activeGenre = genre;
         activeTag = null;
-        document.querySelectorAll('#genreRow .fpill[data-tag]').forEach(p => p.classList.remove('active'));
-      } else if (pill.dataset.tag) {
+        document.querySelectorAll('#genreRow .fpill[data-tag]').forEach(x => x.classList.remove('active'));
+      } else if (tag) {
         const isActive = pill.classList.contains('active');
-        document.querySelectorAll('#genreRow .fpill[data-tag]').forEach(p => p.classList.remove('active'));
-        activeTag = isActive ? null : pill.dataset.tag;
-        if (!isActive) pill.classList.add('active');
+        document.querySelectorAll('#genreRow .fpill[data-tag]').forEach(x => x.classList.remove('active'));
+        if (!isActive) {
+          pill.classList.add('active');
+          activeTag = tag;
+        } else {
+          activeTag = null;
+        }
       }
-      applyFilters(document.getElementById('heroSearchInput').value);
+      applyFilters();
     });
   });
 
   document.querySelectorAll('#playersRow .ppill').forEach(pill => {
     pill.addEventListener('click', () => {
-      document.querySelectorAll('#playersRow .ppill').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('#playersRow .ppill').forEach(x => x.classList.remove('active'));
       pill.classList.add('active');
       activePlayers = pill.dataset.players;
-      applyFilters(document.getElementById('heroSearchInput').value);
+      applyFilters();
     });
   });
 }
 
-function applyFilters(searchTerm = '') {
-  let list = [...allGames];
+function handleSort(sort) {
+  activeSort = sort;
+  applyFilters();
+}
 
-  if (activeGenre !== 'all') list = list.filter(g => g.genre === activeGenre);
-  if (activeTag) list = list.filter(g => Array.isArray(g.tags) && g.tags.includes(activeTag));
+function applyFilters() {
+  filteredGames = allGames.filter(g => {
+    if (activeGenre !== 'all' && g.genre !== activeGenre) return false;
+    if (activeTag && !(g.tags || []).includes(activeTag)) return false;
 
-  if (activePlayers !== 'any') {
-    const n = parseInt(activePlayers, 10);
-    if (n === 1) list = list.filter(g => g.minPlayers === 1);
-    else list = list.filter(g => g.minPlayers <= n && g.maxPlayers >= n);
-  }
+    if (activePlayers !== 'any') {
+      const p = Number(activePlayers);
+      if (activePlayers === '5') {
+        if ((g.maxPlayers || 0) < 5) return false;
+      } else {
+        if ((g.minPlayers || 0) > p || (g.maxPlayers || 0) < p) return false;
+      }
+    }
+    return true;
+  });
 
-  if (searchTerm) {
-    const q = searchTerm.toLowerCase();
-    list = list.filter(g =>
-      g.name.toLowerCase().includes(q) ||
-      g.description.toLowerCase().includes(q) ||
-      g.genre.toLowerCase().includes(q) ||
-      (g.tags || []).some(t => String(t).toLowerCase().includes(q))
-    );
-  }
+  const sortFns = {
+    popular: (a, b) => ((b.tags || []).includes('hot') ? 1 : 0) - ((a.tags || []).includes('hot') ? 1 : 0),
+    newest: (a, b) => ((b.tags || []).includes('new') ? 1 : 0) - ((a.tags || []).includes('new') ? 1 : 0),
+    name: (a, b) => a.name.localeCompare(b.name),
+    quick: (a, b) => (a.estimatedMinutes || 999) - (b.estimatedMinutes || 999),
+  };
 
-  if (activeSort === 'popular') list.sort((a, b) => (b.tags?.includes('hot') ? 1 : 0) - (a.tags?.includes('hot') ? 1 : 0));
-  else if (activeSort === 'newest') list.sort((a, b) => (b.tags?.includes('new') ? 1 : 0) - (a.tags?.includes('new') ? 1 : 0));
-  else if (activeSort === 'name') list.sort((a, b) => a.name.localeCompare(b.name));
-  else if (activeSort === 'quick') list.sort((a, b) => (a.estimatedMinutes || 999) - (b.estimatedMinutes || 999));
-
-  filteredGames = list;
-  document.getElementById('gamesCount').textContent = list.length + ' games';
+  if (sortFns[activeSort]) filteredGames.sort(sortFns[activeSort]);
+  document.getElementById('gamesCount').textContent = `${filteredGames.length} games`;
   renderGames();
 }
 
-function handleSort(val) { activeSort = val; applyFilters(document.getElementById('heroSearchInput').value); }
-function handleHeroSearch(val) { applyFilters(val); document.getElementById('navSearchInput').value = val; }
-function handleNavSearch(val) { applyFilters(val); document.getElementById('heroSearchInput').value = val; }
-function quickSearch(q) {
-  document.getElementById('heroSearchInput').value = q;
-  document.getElementById('navSearchInput').value = q;
-  applyFilters(q);
-  document.querySelector('main').scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-function executeSearch() { applyFilters(document.getElementById('heroSearchInput').value); }
-
 function renderGames() {
   const grid = document.getElementById('gameGrid');
-  if (!filteredGames.length) {
-    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:3rem;color:rgba(26,26,46,.4);font-weight:700">No games found — try a different search</div>`;
-    return;
-  }
-
   grid.innerHTML = filteredGames.map(g => `
-    <div class="game-card" onclick="openCreateModal('${g.id}')">
-      ${g.tags?.includes('hot') ? '<div class="live-badge"><span class="ld"></span>HOT</div>' : ''}
-      ${g.tags?.some(t => ['nostalgic','forgotten','ancient'].includes(t)) ? '<div class="nostalgia-seal">🕰 Classic</div>' : ''}
-      <div class="gc-art ${g.art || 'art-default'}"><span class="gc-sym">${g.symbol || '🎮'}</span></div>
+    <div class="game-card" onclick="openCreateModal('${escHtml(g.id)}')">
+      <div class="gc-art ${escHtml(g.art || 'art-default')}">
+        ${(g.tags || []).includes('hot') ? '<div class="live-badge"><span class="ld"></span>HOT</div>' : ''}
+        ${(g.tags || []).includes('nostalgic') ? '<div class="nostalgia-seal">NOSTALGIA</div>' : ''}
+        <div class="gc-sym">${escHtml(g.symbol || '🎮')}</div>
+      </div>
       <div class="gc-body">
         <div class="gc-title">${escHtml(g.name)}</div>
-        <div class="gc-desc">${escHtml(g.description)}</div>
+        <div class="gc-desc">${escHtml(g.description || '')}</div>
         <div class="gc-meta">
-          <span class="tag tag-genre">${escHtml(g.genre)}</span>
-          <span class="tag tag-players">👥 ${g.minPlayers}${g.maxPlayers > g.minPlayers ? '–' + g.maxPlayers : ''}</span>
-          ${g.tags?.includes('hot') ? '<span class="tag tag-hot">🔥</span>' : ''}
-          ${g.tags?.includes('new') ? '<span class="tag tag-new">✨ New</span>' : ''}
-          ${g.tags?.includes('forgotten') ? '<span class="tag tag-forgotten">🗺 Forgotten</span>' : ''}
-          ${g.tags?.includes('nostalgic') ? '<span class="tag tag-nostalgic">🕰</span>' : ''}
+          <span class="tag tag-genre">${escHtml(g.genre || 'game')}</span>
+          <span class="tag tag-players">${g.minPlayers || 1}-${g.maxPlayers || 2}P</span>
+          ${(g.tags || []).includes('hot') ? '<span class="tag tag-hot">HOT</span>' : ''}
+          ${(g.tags || []).includes('new') ? '<span class="tag tag-new">NEW</span>' : ''}
+          ${(g.tags || []).includes('forgotten') ? '<span class="tag tag-forgotten">FORGOTTEN</span>' : ''}
+          ${(g.tags || []).includes('nostalgic') ? '<span class="tag tag-nostalgic">NOSTALGIC</span>' : ''}
         </div>
-        <div class="gc-actions">
-          <button class="btn-play">▶ Play</button>
-          ${['tictactoe','connect4','battleship','ludo','snakes-ladders','memory-match','hangman','mancala','dots-boxes'].includes(g.id)
-  ? `<button class="btn-bot-sm" onclick="event.stopPropagation();openBotModal('medium','${g.id}')">🤖</button>`
-  : ''
-}
+        <div class="gc-actions" onclick="event.stopPropagation()">
+          <button class="btn-play" onclick="openCreateModal('${escHtml(g.id)}')">Play</button>
+          ${g.botSupport ? `<button class="btn-bot-sm" onclick="openCreateModal('${escHtml(g.id)}', false, 'medium')">Bot</button>` : ''}
         </div>
       </div>
     </div>
@@ -1332,80 +1322,89 @@ function renderGames() {
 function renderRooms(rooms) {
   const grid = document.getElementById('roomsGrid');
   if (!rooms.length) {
-    grid.innerHTML = `<div style="color:rgba(26,26,46,.4);font-size:13px;font-weight:700;grid-column:1/-1;padding:1rem 0">No public rooms right now — be the first to create one!</div>`;
+    grid.innerHTML = `<div style="color:rgba(26,26,46,.4);font-size:13px;font-weight:700;grid-column:1/-1;padding:1rem 0">No live rooms right now — create one!</div>`;
     return;
   }
 
-  grid.innerHTML = rooms.map(r => `
-    <div class="room-card" onclick="quickJoin('${r.code}')">
-      <div class="room-art art-default" style="font-size:18px">🎮</div>
-      <div class="room-info">
-        <div class="room-name">${escHtml(r.gameId)} Room</div>
-        <div class="room-meta">
-          <span class="room-host">by ${escHtml(r.hostName || 'Host')}</span>
-          <span class="room-pcount">👥 ${r.playerCount}/${r.maxPlayers}</span>
-          <span class="room-code">${escHtml(r.code)}</span>
+  grid.innerHTML = rooms.map(r => {
+    const game = allGames.find(g => g.id === r.gameId) || {};
+    return `
+      <div class="room-card" onclick="quickJoin('${escHtml(r.code)}')">
+        <div class="room-art ${escHtml(game.art || 'art-default')}">${escHtml(game.symbol || '🎮')}</div>
+        <div class="room-info">
+          <div class="room-name">${escHtml(game.name || r.gameId)}</div>
+          <div class="room-meta">
+            <span class="room-host">Host: ${escHtml(r.hostName || 'Player')}</span>
+            <span class="room-code">${escHtml(r.code)}</span>
+            <span class="room-pcount">${r.playerCount || 1}/${r.maxPlayers || 2}</span>
+          </div>
         </div>
+        <button class="btn-join-room">Join</button>
       </div>
-      <button class="btn-join-room">Join</button>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 }
 
-function openModal(id) { document.getElementById(id).classList.add('open'); }
-function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function openCreateModal(gameId = null, forcePrivate = false, botDifficulty = null) {
+  openModal('createModal');
 
-document.querySelectorAll('.overlay').forEach(o => {
-  o.addEventListener('click', e => {
-    if (e.target === o) o.classList.remove('open');
+  const sel = document.getElementById('createGameSelect');
+  const privateCheck = document.getElementById('privateCheck');
+  const botSel = document.getElementById('botDifficulty');
+
+  if (gameId) sel.value = gameId;
+  document.getElementById('createGameTag').textContent = sel.options[sel.selectedIndex]?.text || 'Select a Game';
+
+  privateCheck.checked = !!forcePrivate;
+  pendingBotDifficulty = botDifficulty || null;
+  botSel.value = botDifficulty || 'medium';
+}
+
+function openBotModal(level) {
+  const botGames = allGames.filter(g => g.botSupport);
+  if (!botGames.length) return toast('No bot-supported games loaded', 'error');
+
+  const preferred = botGames.find(g => g.id === 'tictactoe')
+    || botGames.find(g => g.id === 'connect4')
+    || botGames[0];
+
+  openCreateModal(preferred.id, false, level);
+  document.getElementById('botDifficulty').value = level;
+  setPcByValue(1);
+}
+
+function openJoinModal() { openModal('joinModal'); }
+
+function openModal(id) {
+  document.getElementById(id).classList.add('open');
+}
+
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+
+window.addEventListener('click', e => {
+  document.querySelectorAll('.overlay.open').forEach(modal => {
+    if (e.target === modal) modal.classList.remove('open');
   });
 });
 
-function setPc(el, n) {
-  document.querySelectorAll('#createPcRow .pc-btn').forEach(b => b.classList.remove('sel'));
+function setPc(el, value) {
+  document.querySelectorAll('#createPcRow .pc-btn').forEach(x => x.classList.remove('sel'));
   el.classList.add('sel');
-  selectedPc = n;
+  selectedPc = value;
+}
+
+function setPcByValue(value) {
+  const buttons = [...document.querySelectorAll('#createPcRow .pc-btn')];
+  const idx = Math.max(0, Math.min(buttons.length - 1, value - 1));
+  buttons.forEach(x => x.classList.remove('sel'));
+  if (buttons[idx]) buttons[idx].classList.add('sel');
+  selectedPc = value;
 }
 
 function defaultPlayerName() {
-  return currentUser?.name || currentUser?.email || 'Player';
-}
-
-function openCreateModal(gameId = null, isPrivate = false) {
-  const sel = document.getElementById('createGameSelect');
-  const nameInput = document.getElementById('createName');
-
-  if (gameId) {
-    sel.value = gameId;
-    const g = allGames.find(x => x.id === gameId);
-    document.getElementById('createGameTag').textContent = g?.name || gameId;
-  }
-
-  if (!nameInput.value.trim()) nameInput.value = defaultPlayerName();
-  document.getElementById('privateCheck').checked = !!isPrivate;
-  openModal('createModal');
-}
-
-function openBotModal(difficulty, gameId = null) {
-  pendingBotDifficulty = difficulty;
-  if (gameId) {
-    const sel = document.getElementById('createGameSelect');
-    sel.value = gameId;
-    const g = allGames.find(x => x.id === gameId);
-    document.getElementById('createGameTag').textContent = g?.name || gameId;
-  }
-  document.getElementById('botDifficulty').value = difficulty;
-  if (!document.getElementById('createName').value.trim()) {
-    document.getElementById('createName').value = defaultPlayerName();
-  }
-  openModal('createModal');
-}
-
-function openJoinModal() {
-  if (!document.getElementById('joinName').value.trim()) {
-    document.getElementById('joinName').value = defaultPlayerName();
-  }
-  openModal('joinModal');
+  return currentUser?.name || 'Player';
 }
 
 function doCreateRoom() {
@@ -1414,7 +1413,10 @@ function doCreateRoom() {
 
   const name = document.getElementById('createName').value.trim() || defaultPlayerName();
   const isPrivate = document.getElementById('privateCheck').checked;
-  const botDiff = document.getElementById('botDifficulty').value || null;
+  let botDiff = document.getElementById('botDifficulty').value || null;
+
+  // solo or explicit bot mode
+  if (selectedPc === 1 && !botDiff) botDiff = 'medium';
 
   closeModal('createModal');
 
@@ -1434,6 +1436,7 @@ function doCreateRoom() {
 
     document.getElementById('displayCode').textContent = res.room.code;
 
+    // Bot room starts immediately
     if (res.gameStarted && res.state) {
       closeModal('codeModal');
       showGameRoom(true);
@@ -1504,10 +1507,11 @@ function copyCode() {
   toast('Code copied!', 'success');
 }
 
-function enterRoom() {
+function enterRoom(gameAlreadyStarted = false) {
   closeModal('codeModal');
-  showGameRoom();
-  if (currentRoomCode && !hasAutoReadiedCurrentRoom) {
+  showGameRoom(gameAlreadyStarted);
+
+  if (!gameAlreadyStarted && currentRoomCode && !hasAutoReadiedCurrentRoom) {
     hasAutoReadiedCurrentRoom = true;
     socket.emit('room:ready', { code: currentRoomCode }, () => {});
   }
@@ -1518,12 +1522,22 @@ function showGameRoom(gameAlreadyStarted = false) {
   const g = allGames.find(x => x.id === currentGameId) || {};
   document.getElementById('grGameName').textContent = g.name || 'Game';
   document.getElementById('grRoomCode').textContent = currentRoomCode || '—';
-  document.getElementById('gpIcon').textContent = g.symbol || '🎮';
-  document.getElementById('gpTitle').textContent = g.name || 'Game';
-  document.getElementById('gpDesc').textContent = g.description || '';
-  document.getElementById('readyBtn').style.display = gameAlreadyStarted ? 'none' : 'block';
-  document.getElementById('readyBtn').textContent = 'I\'m Ready ✓';
-  document.getElementById('readyBtn').onclick = setReady;
+
+  const root = document.getElementById('gamePlaceholder');
+  root.innerHTML = `
+    <span class="gp-icon" id="gpIcon">${g.symbol || '🎮'}</span>
+    <div class="gp-title" id="gpTitle">${escHtml(g.name || 'Game')}</div>
+    <div class="turn-indicator" id="turnIndicator">
+      <span class="turn-dot"></span>
+      <span id="turnText">${gameAlreadyStarted ? 'Game in progress' : 'Waiting for players'}</span>
+    </div>
+    <div class="gp-desc" id="gpDesc">${escHtml(g.description || '')}</div>
+    <div id="gameBoardHost" style="margin-top:16px;width:100%"></div>
+    <button class="btn-primary" id="readyBtn" onclick="setReady()" style="display:${gameAlreadyStarted ? 'none' : 'block'};margin-top:16px">
+      I'm Ready ✓
+    </button>
+  `;
+
   if (currentRoom) renderPlayerList(currentRoom.players);
   appendChat('You joined the room', 'system');
 }
@@ -1540,23 +1554,28 @@ function leaveRoom() {
 
 function updateGameState(state) {
   if (!state) return;
+
   const myId = getMyId();
   const isMyTurn = state.currentTurn === myId;
+  const turnText = document.getElementById('turnText');
+  const turnIndicator = document.getElementById('turnIndicator');
 
-  document.getElementById('turnText').textContent = isMyTurn ? 'Your Turn!' : `Waiting for ${getPlayerName(state.currentTurn)}`;
-  document.getElementById('turnIndicator').style.borderColor = isMyTurn ? 'var(--coral)' : 'var(--border)';
+  if (turnText) {
+    turnText.textContent = isMyTurn ? 'Your Turn!' : `Waiting for ${getPlayerName(state.currentTurn)}`;
+  }
+  if (turnIndicator) {
+    turnIndicator.style.borderColor = isMyTurn ? 'var(--coral)' : 'var(--border)';
+  }
 
-  if (currentRoom) {
+  if (state.players && currentRoom) {
     currentRoom.gameState = state;
-    if (Array.isArray(state.players) && (!currentRoom.players || currentRoom.players.length === 0)) {
-      currentRoom.players = state.players.map(id => ({ id, name: getPlayerName(id) }));
-    }
-    renderPlayerList(currentRoom.players || []);
+    renderPlayerList(currentRoom.players);
+  } else if (currentRoom) {
+    currentRoom.gameState = state;
   }
 
   renderGameBoard(state);
 }
-
 
 function sendMove(move) {
   if (!currentRoomCode) return;
@@ -1566,15 +1585,21 @@ function sendMove(move) {
 }
 
 function renderGameBoard(state) {
-  const root = document.getElementById('gamePlaceholder');
+  const root = document.getElementById('gameBoardHost');
   if (!root) return;
 
-  if (currentGameId === 'tictactoe' && Array.isArray(state.board)) {
+  if (currentGameId === 'tictactoe' && Array.isArray(state.board) && state.board.length === 9) {
     renderTicTacToeBoard(root, state);
     return;
   }
 
-  if (currentGameId === 'connect4' && Array.isArray(state.board)) {
+  if (
+    currentGameId === 'connect4' &&
+    Array.isArray(state.board) &&
+    state.board.length === 6 &&
+    Array.isArray(state.board[0]) &&
+    state.board[0].length === 7
+  ) {
     renderConnect4Board(root, state);
     return;
   }
@@ -1601,8 +1626,8 @@ function renderTicTacToeBoard(root, state) {
               background:white;
               font:800 2.5rem var(--ff-b);
               color:var(--navy);
-              cursor:${isMyTurn && !cell ? 'pointer' : 'default'};
-              box-shadow:var(--shadow);
+              cursor:${isMyTurn && !cell ? 'pointer' : 'not-allowed'};
+              box-shadow:${winLine.includes(i) ? '0 0 0 4px rgba(12,166,120,.15)' : 'none'};
             "
             ${!isMyTurn || cell || state.status !== 'playing' ? 'disabled' : ''}
           >${cell || ''}</button>
@@ -1611,7 +1636,7 @@ function renderTicTacToeBoard(root, state) {
       <div style="font-size:13px;font-weight:800;color:rgba(26,26,46,.55)">
         ${state.status === 'finished'
           ? (state.draw ? 'Draw game' : `${getPlayerName(state.winner)} wins`)
-          : (isMyTurn ? 'Tap a square to play' : 'Waiting for opponent')}
+          : (isMyTurn ? 'Choose a square' : 'Waiting for opponent')}
       </div>
     </div>
   `;
@@ -1624,16 +1649,21 @@ function renderTicTacToeBoard(root, state) {
 function renderConnect4Board(root, state) {
   const myId = getMyId();
   const isMyTurn = state.currentTurn === myId && state.status === 'playing';
-  const cols = state.board[0]?.length || 7;
-  const rows = state.board.length || 6;
+  const rows = state.board.length;
+  const cols = state.board[0].length;
 
-  const colButtons = Array.from({ length: cols }, (_, col) => `
+  const colButtons = Array.from({ length: cols }, (_, c) => `
     <button
       type="button"
-      data-col="${col}"
+      data-col="${c}"
       style="
-        padding:8px 0;border:none;border-radius:10px;background:${isMyTurn ? 'var(--navy)' : 'rgba(26,26,46,.2)'};
-        color:white;font:800 12px var(--ff-b);cursor:${isMyTurn ? 'pointer' : 'default'};
+        padding:10px 0;
+        border:none;
+        border-radius:12px;
+        background:${isMyTurn ? 'var(--coral)' : 'rgba(26,26,46,.12)'};
+        color:white;
+        font:800 14px var(--ff-b);
+        cursor:${isMyTurn ? 'pointer' : 'not-allowed'};
       "
       ${!isMyTurn || state.status !== 'playing' ? 'disabled' : ''}
     >↓</button>
@@ -1676,7 +1706,6 @@ function renderFallbackState(root, state) {
   `;
 }
 
-
 function renderPlayerList(players) {
   const myId = getMyId();
   const activeTurn = currentRoom?.gameState?.currentTurn;
@@ -1706,7 +1735,8 @@ function updatePlayerReady(playerId) {
 
 function setReady() {
   if (!currentRoomCode) return;
-  document.getElementById('readyBtn').style.display = 'none';
+  const btn = document.getElementById('readyBtn');
+  if (btn) btn.style.display = 'none';
   socket.emit('room:ready', { code: currentRoomCode });
 }
 
@@ -1754,12 +1784,23 @@ function sendReaction(reaction) {
   showFloatingReaction(reaction);
 }
 
-function showFloatingReaction(emoji) {
+function showFloatingReaction(reaction) {
   const el = document.createElement('div');
-  el.textContent = emoji;
-  el.style.cssText = `position:fixed;font-size:2.5rem;bottom:120px;right:${30 + Math.random() * 120}px;animation:float 2s ease forwards;pointer-events:none;z-index:999`;
+  el.textContent = reaction;
+  el.style.position = 'fixed';
+  el.style.left = (window.innerWidth / 2 + (Math.random() * 120 - 60)) + 'px';
+  el.style.top = (window.innerHeight / 2 + (Math.random() * 80 - 40)) + 'px';
+  el.style.fontSize = '2rem';
+  el.style.zIndex = '999';
+  el.style.transition = 'all 1s ease';
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 2000);
+
+  requestAnimationFrame(() => {
+    el.style.transform = 'translateY(-60px) scale(1.2)';
+    el.style.opacity = '0';
+  });
+
+  setTimeout(() => el.remove(), 1000);
 }
 
 function getMyId() {
@@ -1798,6 +1839,36 @@ function toast(msg, type = 'info') {
   setTimeout(() => el.remove(), 3500);
 }
 
+function handleNavSearch(v) {
+  const q = String(v || '').trim().toLowerCase();
+  if (!q) {
+    filteredGames = [...allGames];
+  } else {
+    filteredGames = allGames.filter(g =>
+      g.name.toLowerCase().includes(q) ||
+      (g.description || '').toLowerCase().includes(q) ||
+      (g.genre || '').toLowerCase().includes(q) ||
+      (g.tags || []).some(t => t.toLowerCase().includes(q))
+    );
+  }
+  renderGames();
+}
+
+function handleHeroSearch(v) {
+  handleNavSearch(v);
+}
+
+function executeSearch() {
+  const q = document.getElementById('heroSearchInput').value;
+  handleHeroSearch(q);
+  window.scrollTo({ top: document.querySelector('.filters-bar').offsetTop - 70, behavior: 'smooth' });
+}
+
+function quickSearch(q) {
+  document.getElementById('heroSearchInput').value = q;
+  executeSearch();
+}
+
 const FALLBACK_GAMES = [
   {id:'chess',name:'Chess',genre:'strategy',minPlayers:2,maxPlayers:2,estimatedMinutes:30,description:'The timeless battle of wits',tags:['hot','classic'],art:'art-chess',symbol:'♟',botSupport:true},
   {id:'ludo',name:'Ludo',genre:'board',minPlayers:2,maxPlayers:4,estimatedMinutes:40,description:'Race your pieces home',tags:['hot','classic'],art:'art-ludo',symbol:'🏠',botSupport:true},
@@ -1807,11 +1878,38 @@ const FALLBACK_GAMES = [
   {id:'connect4',name:'Connect 4',genre:'strategy',minPlayers:2,maxPlayers:2,estimatedMinutes:10,description:'Four in a row',tags:['classic','family'],art:'art-connect4',symbol:'🟡',botSupport:true},
   {id:'wordle',name:'Wordle',genre:'word',minPlayers:1,maxPlayers:4,estimatedMinutes:10,description:'Guess the 5-letter word',tags:['hot','new'],art:'art-wordle',symbol:'🟩',botSupport:false},
   {id:'mancala',name:'Mancala',genre:'board',minPlayers:2,maxPlayers:2,estimatedMinutes:15,description:'Sow and capture seeds',tags:['forgotten','nostalgic'],art:'art-mancala',symbol:'🟤',botSupport:true},
-  {id:'memory-match',name:'Memory Match',genre:'memory',minPlayers:1,maxPlayers:4,estimatedMinutes:15,description:'Flip and match pairs',tags:['family','classic'],art:'art-memory',symbol:'🧠',botSupport:true},
-  {id:'mastermind',name:'Mastermind',genre:'memory',minPlayers:2,maxPlayers:2,estimatedMinutes:15,description:'Crack the color code',tags:['nostalgic','forgotten'],art:'art-mastermind',symbol:'🔐',botSupport:true},
-  {id:'hangman',name:'Hangman',genre:'word',minPlayers:2,maxPlayers:6,estimatedMinutes:10,description:'Guess the word',tags:['classic','family','nostalgic'],art:'art-hangman',symbol:'✏️',botSupport:true},
-  {id:'dots-boxes',name:'Dots & Boxes',genre:'strategy',minPlayers:2,maxPlayers:4,estimatedMinutes:15,description:'Connect dots to claim boxes',tags:['nostalgic','forgotten'],art:'art-dots',symbol:'⬛',botSupport:true},
 ];
+
+window.openCreateModal = openCreateModal;
+window.openBotModal = openBotModal;
+window.openJoinModal = openJoinModal;
+window.closeModal = closeModal;
+window.doCreateRoom = doCreateRoom;
+window.doJoinRoom = doJoinRoom;
+window.copyCode = copyCode;
+window.enterRoom = enterRoom;
+window.leaveRoom = leaveRoom;
+window.copyRoomCode = copyRoomCode;
+window.setReady = setReady;
+window.openRematch = openRematch;
+window.sendChat = sendChat;
+window.sendReaction = sendReaction;
+window.showHome = showHome;
+window.signInGoogle = signInGoogle;
+window.signInGuest = signInGuest;
+window.signInEmail = signInEmail;
+window.signOutUser = signOutUser;
+window.toggleUserMenu = toggleUserMenu;
+window.openProfile = openProfile;
+window.openStats = openStats;
+window.openFavorites = openFavorites;
+window.setPSel = setPSel;
+window.handleNavSearch = handleNavSearch;
+window.handleHeroSearch = handleHeroSearch;
+window.executeSearch = executeSearch;
+window.quickSearch = quickSearch;
+window.handleSort = handleSort;
+window.fmtCode = fmtCode;
+window.quickJoin = quickJoin;
+window.setPc = setPc;
 </script>
-</body>
-</html>
