@@ -979,6 +979,7 @@ let currentRoom = null, currentRoomCode = null, currentGameId = null;
 let hasAutoReadiedCurrentRoom = false;
 let pendingBotDifficulty = null;
 let selectedPc = 2;
+let myPlayerId = null; // canonical player ID assigned by server
 
 document.addEventListener('DOMContentLoaded', async () => {
   initFirebaseAuth();
@@ -1125,7 +1126,11 @@ function connectSocket() {
     autoConnect: true,
   });
 
-  socket.on('connect', () => console.log('Socket connected:', socket.id));
+  socket.on('connect', () => {
+    console.log('Socket connected:', socket.id);
+    // If no Firebase user, the socket.id IS our player ID — capture it now
+    if (!myPlayerId && !currentUser) myPlayerId = socket.id;
+  });
   socket.on('disconnect', () => toast('Connection lost. Reconnecting…', 'error'));
   socket.on('reconnect', () => toast('Reconnected!', 'success'));
 
@@ -1429,6 +1434,9 @@ function doCreateRoom() {
   }, res => {
     if (res?.error) return toast(res.error, 'error');
 
+    // The host's player ID is their socket.id at creation time — lock it in
+    myPlayerId = socket.id;
+
     currentRoom = res.room;
     currentRoomCode = res.room.code;
     currentGameId = gameId;
@@ -1466,6 +1474,7 @@ function quickJoin(code, name = defaultPlayerName()) {
   socket.emit('room:join', { code, playerName: name }, res => {
     if (res?.error) return toast(res.error, 'error');
 
+    myPlayerId = socket.id; // lock in our ID
     currentRoom = res.room;
     currentRoomCode = code;
     currentGameId = res.room.gameId;
@@ -1511,6 +1520,7 @@ function enterRoom(gameAlreadyStarted = false) {
   closeModal('codeModal');
   showGameRoom(gameAlreadyStarted);
 
+  // Only fire room:ready if the game hasn't started and we haven't already readied up
   if (!gameAlreadyStarted && currentRoomCode && !hasAutoReadiedCurrentRoom) {
     hasAutoReadiedCurrentRoom = true;
     socket.emit('room:ready', { code: currentRoomCode }, () => {});
@@ -1550,6 +1560,7 @@ function leaveRoom() {
   currentRoomCode = null;
   currentGameId = null;
   hasAutoReadiedCurrentRoom = false;
+  myPlayerId = null;
 }
 
 function updateGameState(state) {
@@ -1589,22 +1600,439 @@ function renderGameBoard(state) {
   if (!root) return;
 
   if (currentGameId === 'tictactoe' && Array.isArray(state.board) && state.board.length === 9) {
-    renderTicTacToeBoard(root, state);
-    return;
+    renderTicTacToeBoard(root, state); return;
   }
-
-  if (
-    currentGameId === 'connect4' &&
-    Array.isArray(state.board) &&
-    state.board.length === 6 &&
-    Array.isArray(state.board[0]) &&
-    state.board[0].length === 7
-  ) {
-    renderConnect4Board(root, state);
-    return;
+  if (currentGameId === 'connect4' && Array.isArray(state.board) && state.board.length === 6) {
+    renderConnect4Board(root, state); return;
+  }
+  if (currentGameId === 'wordle' && state.scores) {
+    renderWordleBoard(root, state); return;
+  }
+  if (currentGameId === 'hangman' && state.display) {
+    renderHangmanBoard(root, state); return;
+  }
+  if (currentGameId === 'mastermind' && state.guesses !== undefined) {
+    renderMastermindBoard(root, state); return;
+  }
+  if (currentGameId === 'memory-match' && state.cards) {
+    renderMemoryBoard(root, state); return;
+  }
+  if (currentGameId === 'mancala' && state.board && state.board.length === 14) {
+    renderMancalaBoard(root, state); return;
+  }
+  if (currentGameId === 'snakes-ladders' && state.positions) {
+    renderSnakesLaddersBoard(root, state); return;
+  }
+  if (currentGameId === 'battleship' && state.hits) {
+    renderBattleshipBoard(root, state); return;
+  }
+  if (currentGameId === 'dots-boxes' && state.h) {
+    renderDotsBoxesBoard(root, state); return;
   }
 
   renderFallbackState(root, state);
+}
+
+// ── Wordle ──────────────────────────────────────────────────────────────────
+function renderWordleBoard(root, state) {
+  const myId = getMyId();
+  const me = state.scores?.[myId];
+  const guesses = me?.guesses || [];
+  const MAX = state.maxGuesses || 6;
+  const WL = state.wordLength || 5;
+  const canGuess = state.status === 'playing' && me && !me.solved && guesses.length < MAX;
+
+  const colors = { correct: '#538D4E', present: '#B59F3B', absent: '#3A3A3C' };
+  const rows = Array.from({ length: MAX }, (_, ri) => {
+    const g = guesses[ri];
+    return `<div style="display:flex;gap:6px;justify-content:center">` +
+      Array.from({ length: WL }, (__, ci) => {
+        const ch = g ? g.word[ci] : '';
+        const bg = g ? (colors[g.result[ci]] || '#3A3A3C') : 'white';
+        const clr = g ? 'white' : '#1A1A2E';
+        const brd = g ? 'transparent' : '2px solid #d3d6da';
+        return `<div style="width:52px;height:52px;border:${brd};background:${bg};color:${clr};display:flex;align-items:center;justify-content:center;font-family:var(--ff-d);font-size:1.5rem;border-radius:6px">${ch}</div>`;
+      }).join('') +
+    `</div>`;
+  }).join('');
+
+  root.innerHTML = `
+    <div style="width:min(92vw,360px);margin:0 auto;text-align:center">
+      <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px">${rows}</div>
+      ${canGuess ? `
+        <div style="display:flex;gap:8px;justify-content:center">
+          <input id="wordleInput" maxlength="5" placeholder="Type guess…"
+            style="padding:10px;border:2px solid var(--border);border-radius:10px;font-family:var(--ff-d);font-size:1.2rem;text-transform:uppercase;width:160px;text-align:center;outline:none"
+            oninput="this.value=this.value.toUpperCase()"
+            onkeydown="if(event.key==='Enter')wordleGuess()">
+          <button onclick="wordleGuess()" style="padding:10px 18px;background:var(--coral);color:white;border:none;border-radius:10px;font-family:var(--ff-b);font-weight:800;cursor:pointer">Guess</button>
+        </div>` : `<div style="font-weight:800;color:rgba(26,26,46,.55)">${me?.solved ? '🎉 Solved in ' + me.solvedIn + ' guesses!' : state.status==='finished' ? 'Word was: '+state.revealWord : 'Waiting…'}</div>`}
+    </div>`;
+}
+function wordleGuess() {
+  const inp = document.getElementById('wordleInput');
+  const guess = inp?.value?.trim();
+  if (!guess || guess.length !== 5) return toast('Enter a 5-letter word', 'error');
+  sendMove({ guess });
+  if (inp) inp.value = '';
+}
+
+// ── Hangman ─────────────────────────────────────────────────────────────────
+function renderHangmanBoard(root, state) {
+  const myId = getMyId();
+  const isMyTurn = state.currentTurn === myId && state.status === 'playing';
+  const wrong = state.wrongCount || 0;
+  const max = state.maxWrong || 6;
+  const parts = ['😵','head','body','left arm','right arm','left leg','right leg'];
+  const display = (state.display || []).join(' ');
+
+  root.innerHTML = `
+    <div style="width:min(92vw,420px);margin:0 auto;text-align:center">
+      <div style="font-size:3rem;margin:8px 0">${wrong >= max ? '☠️' : wrong >= 5 ? '😨' : wrong >= 3 ? '😟' : '🙂'}</div>
+      <div style="font-family:var(--ff-d);font-size:1.8rem;letter-spacing:10px;margin:12px 0;color:var(--navy)">${display}</div>
+      <div style="font-size:12px;font-weight:800;color:var(--red);margin-bottom:8px">Wrong: ${wrong}/${max} — ${(state.wrongGuesses||[]).join(' ')}</div>
+      ${state.status === 'finished'
+        ? `<div style="font-weight:800;color:rgba(26,26,46,.6)">${state.winner ? '🎉 Correct!' : '💀 Word was: ' + (state.revealWord || state.word || '?')}</div>`
+        : isMyTurn
+          ? `<div style="display:flex;flex-wrap:wrap;gap:5px;justify-content:center;max-width:340px;margin:12px auto">
+              ${'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map(l => {
+                const used = (state.guessedLetters||[]).includes(l);
+                const hit = used && state.display?.includes(l);
+                const bg = used ? (hit ? '#538D4E' : '#3A3A3C') : 'white';
+                const clr = used ? 'white' : 'var(--navy)';
+                return `<button onclick="sendMove({letter:'${l}'})" ${used?'disabled':''} style="width:36px;height:36px;border:1.5px solid var(--border);border-radius:8px;background:${bg};color:${clr};font-weight:800;cursor:${used?'not-allowed':'pointer'}">${l}</button>`;
+              }).join('')}
+            </div>`
+          : `<div style="font-weight:700;color:rgba(26,26,46,.4)">Waiting for ${getPlayerName(state.currentTurn)}…</div>`}
+    </div>`;
+}
+
+// ── Mastermind ───────────────────────────────────────────────────────────────
+function renderMastermindBoard(root, state) {
+  const myId = getMyId();
+  const isGuesser = state.guesser === myId;
+  const canGuess = state.status === 'playing' && isGuesser;
+  const colors = { R:'#E03131',G:'#2F9E44',B:'#228BE6',Y:'#F59F00',O:'#FF6B35',P:'#7048E8' };
+  const labels = { R:'Red',G:'Green',B:'Blue',Y:'Yellow',O:'Orange',P:'Purple' };
+
+  const rows = (state.guesses||[]).map(g => `
+    <div style="display:flex;align-items:center;gap:8px;justify-content:center">
+      <div style="display:flex;gap:4px">${g.code.map(c=>`<div style="width:32px;height:32px;border-radius:50%;background:${colors[c]||'#ccc'};border:2px solid rgba(0,0,0,.15)"></div>`).join('')}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:3px;width:56px">
+        ${Array.from({length:g.blacks},()=>'<div style="width:12px;height:12px;border-radius:50%;background:#1A1A2E"></div>').join('')}
+        ${Array.from({length:g.whites},()=>'<div style="width:12px;height:12px;border-radius:50%;background:#ccc;border:1px solid #aaa"></div>').join('')}
+      </div>
+      <span style="font-size:11px;font-weight:800;color:rgba(26,26,46,.4)">⚫${g.blacks} ⚪${g.whites}</span>
+    </div>`).join('');
+
+  root.innerHTML = `
+    <div style="width:min(92vw,420px);margin:0 auto;text-align:center">
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">${rows || '<div style="color:rgba(26,26,46,.4);font-size:13px">No guesses yet</div>'}</div>
+      ${state.status==='finished'
+        ? `<div style="font-weight:800">${state.winner===myId?'🎉 You cracked it!':'💀 Secret was: '+(state.revealSecret||[]).join(' ')}</div>`
+        : canGuess
+          ? `<div>
+              <div style="font-size:12px;font-weight:800;margin-bottom:8px;color:rgba(26,26,46,.5)">Build your guess (${(state.colors||[]).join(' ')})</div>
+              <div id="mmGuess" style="display:flex;gap:6px;justify-content:center;margin-bottom:10px"></div>
+              <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-bottom:10px">
+                ${(state.colors||['R','G','B','Y','O','P']).map(c=>`<button onclick="mmAdd('${c}')" style="width:36px;height:36px;border-radius:50%;background:${colors[c]};border:2px solid rgba(0,0,0,.15);cursor:pointer" title="${labels[c]||c}"></button>`).join('')}
+              </div>
+              <div style="display:flex;gap:8px;justify-content:center">
+                <button onclick="mmClear()" style="padding:8px 16px;border:1.5px solid var(--border);border-radius:10px;background:white;font-weight:800;cursor:pointer">Clear</button>
+                <button onclick="mmSubmit()" style="padding:8px 16px;background:var(--coral);color:white;border:none;border-radius:10px;font-weight:800;cursor:pointer">Submit</button>
+              </div>
+            </div>`
+          : `<div style="font-weight:700;color:rgba(26,26,46,.4)">${isGuesser?'Waiting for bot…':'Watching as codemaker'}</div>`}
+    </div>`;
+  if (canGuess) window._mmCode = window._mmCode || [];
+  mmRender();
+}
+window._mmCode = [];
+function mmRender() {
+  const host = document.getElementById('mmGuess'); if (!host) return;
+  const colors = { R:'#E03131',G:'#2F9E44',B:'#228BE6',Y:'#F59F00',O:'#FF6B35',P:'#7048E8' };
+  host.innerHTML = window._mmCode.map(c=>`<div style="width:32px;height:32px;border-radius:50%;background:${colors[c]};border:2px solid rgba(0,0,0,.15)"></div>`).join('') +
+    Array.from({length:Math.max(0,4-window._mmCode.length)},()=>'<div style="width:32px;height:32px;border-radius:50%;background:#eee;border:2px dashed #ccc"></div>').join('');
+}
+function mmAdd(c) { if (window._mmCode.length < 4) { window._mmCode.push(c); mmRender(); } }
+function mmClear() { window._mmCode = []; mmRender(); }
+function mmSubmit() {
+  if (window._mmCode.length !== 4) return toast('Pick 4 colors', 'error');
+  sendMove({ code: [...window._mmCode] });
+  window._mmCode = [];
+}
+
+// ── Memory Match ─────────────────────────────────────────────────────────────
+function renderMemoryBoard(root, state) {
+  const myId = getMyId();
+  const isMyTurn = state.currentTurn === myId && state.status === 'playing' && !state.lockBoard;
+  const cols = state.gridSize || 4;
+
+  root.innerHTML = `
+    <div style="width:min(92vw,480px);margin:0 auto;text-align:center">
+      <div style="display:grid;grid-template-columns:repeat(${cols},1fr);gap:8px;margin-bottom:12px">
+        ${state.cards.map((c, i) => {
+          const visible = c.flipped || c.matched;
+          return `<button data-ci="${i}" ${(!isMyTurn || visible)?'disabled':''}
+            style="aspect-ratio:1;border-radius:12px;border:2px solid ${c.matched?'var(--teal)':'var(--border)'};
+              background:${c.matched?'#E6FCF5':visible?'white':'var(--navy)'};
+              font-size:1.6rem;cursor:${isMyTurn && !visible ?'pointer':'not-allowed'};
+              transition:.2s;box-shadow:${c.matched?'0 0 0 2px var(--teal)':'none'}">
+            ${visible ? c.symbol : ''}
+          </button>`;
+        }).join('')}
+      </div>
+      <div style="font-size:12px;font-weight:800;color:rgba(26,26,46,.5)">
+        ${state.status==='finished'?`Game over! Winner: ${getPlayerName(state.winner)}`
+          : isMyTurn?'Your turn — pick a card':'Waiting for ' + getPlayerName(state.currentTurn)}
+      </div>
+      ${state.lockBoard ? `<button onclick="memUnlock()" style="margin-top:10px;padding:8px 20px;background:var(--navy);color:white;border:none;border-radius:10px;font-weight:800;cursor:pointer">Flip Back</button>` : ''}
+    </div>`;
+
+  root.querySelectorAll('button[data-ci]').forEach(btn => {
+    btn.addEventListener('click', () => sendMove({ cardIndex: Number(btn.dataset.ci) }));
+  });
+}
+function memUnlock() {
+  if (!currentRoomCode) return;
+  socket.emit('game:unlock', { code: currentRoomCode }, res => {
+    if (res?.error) toast(res.error, 'error');
+  });
+}
+
+// ── Mancala ──────────────────────────────────────────────────────────────────
+function renderMancalaBoard(root, state) {
+  const myId = getMyId();
+  const isP1 = state.players?.[0] === myId;
+  const isMyTurn = state.currentTurn === myId && state.status === 'playing';
+  const board = state.board;
+  // P1: pits 0-5, store 6 | P2: pits 7-12, store 13
+  const p1Pits = [0,1,2,3,4,5], p2Pits = [7,8,9,10,11,12];
+
+  const pit = (idx, label, clickable) => `
+    <button onclick="${clickable ? `sendMove({pit:${idx}})` : ''}"
+      data-pit="${idx}"
+      style="min-width:48px;min-height:48px;padding:4px;border-radius:50%;
+        border:2px solid ${clickable && board[idx]>0 ? 'var(--coral)' : 'var(--border)'};
+        background:${clickable && board[idx]>0 ? '#FFF0E6' : 'white'};
+        cursor:${clickable && board[idx]>0 ? 'pointer' : 'not-allowed'};
+        font-family:var(--ff-d);font-size:1.1rem;color:var(--navy);
+        display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px"
+      ${(!clickable || board[idx]===0) ? 'disabled' : ''}>
+      <span>${board[idx]}</span>
+      <span style="font-size:9px;font-weight:700;color:rgba(26,26,46,.35)">${label}</span>
+    </button>`;
+
+  const store = (idx, label) => `
+    <div style="min-width:56px;min-height:80px;border-radius:28px;background:var(--cream2);
+      border:2px solid var(--border);display:flex;flex-direction:column;align-items:center;
+      justify-content:center;gap:4px;padding:8px">
+      <span style="font-family:var(--ff-d);font-size:1.4rem">${board[idx]}</span>
+      <span style="font-size:9px;font-weight:700;color:rgba(26,26,46,.4)">${label}</span>
+    </div>`;
+
+  const p1CanClick = isP1 && isMyTurn;
+  const p2CanClick = !isP1 && isMyTurn;
+
+  root.innerHTML = `
+    <div style="width:min(92vw,600px);margin:0 auto;text-align:center">
+      <div style="font-size:12px;font-weight:800;color:rgba(26,26,46,.5);margin-bottom:8px">
+        ${isMyTurn ? 'Your turn — click a pit' : 'Waiting for ' + getPlayerName(state.currentTurn)}
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        ${store(13, 'P2 Store')}
+        <div style="flex:1;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;justify-content:space-around">
+            ${[...p2Pits].reverse().map(i => pit(i, i-6, p2CanClick)).join('')}
+          </div>
+          <div style="display:flex;justify-content:space-around">
+            ${p1Pits.map(i => pit(i, i+1, p1CanClick)).join('')}
+          </div>
+        </div>
+        ${store(6, 'P1 Store')}
+      </div>
+      ${state.status==='finished' ? `<div style="margin-top:12px;font-weight:800">${state.winner==='tie'?'Tie!':getPlayerName(state.winner)+' wins!'}</div>` : ''}
+    </div>`;
+}
+
+// ── Snakes & Ladders ─────────────────────────────────────────────────────────
+function renderSnakesLaddersBoard(root, state) {
+  const myId = getMyId();
+  const isMyTurn = state.currentTurn === myId && state.status === 'playing';
+  const colors = ['#E03131','#2F9E44','#228BE6','#F59F00'];
+  const playerColors = {};
+  (state.players||[]).forEach((pid,i) => { playerColors[pid] = colors[i % colors.length]; });
+
+  // Build 10x10 grid (snaking: row 9=1-10, row 8=11-20, etc.)
+  const cells = [];
+  for (let row = 9; row >= 0; row--) {
+    const rowNum = 9 - row;
+    for (let col = 0; col < 10; col++) {
+      const c = rowNum % 2 === 0 ? col : 9 - col;
+      cells.push(row * 10 + c + 1);
+    }
+  }
+
+  const grid = cells.map(num => {
+    const here = (state.players||[]).filter(pid => state.positions[pid] === num);
+    return `<div style="position:relative;aspect-ratio:1;background:${num%2===0?'#f8f0e3':'white'};border:1px solid #e0d6c8;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:rgba(26,26,46,.35)">
+      ${num}
+      ${here.map(pid=>`<div style="position:absolute;width:10px;height:10px;border-radius:50%;background:${playerColors[pid]};border:1px solid white"></div>`).join('')}
+    </div>`;
+  }).join('');
+
+  root.innerHTML = `
+    <div style="width:min(92vw,420px);margin:0 auto;text-align:center">
+      <div style="display:grid;grid-template-columns:repeat(10,1fr);gap:1px;border:2px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:12px">${grid}</div>
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:10px">
+        ${(state.players||[]).map(pid=>`<div style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:700"><div style="width:12px;height:12px;border-radius:50%;background:${playerColors[pid]}"></div>${getPlayerName(pid)}: sq ${state.positions[pid]||0}</div>`).join('')}
+      </div>
+      ${state.lastEvent ? `<div style="font-size:12px;font-weight:800;color:${state.lastEvent.type==='snake'?'var(--red)':'var(--teal)'};margin-bottom:8px">
+        ${state.lastEvent.type==='snake'?'🐍 Snake!':'🪜 Ladder!'} ${state.lastEvent.from}→${state.lastEvent.to}
+      </div>` : ''}
+      ${state.status==='finished'
+        ? `<div style="font-weight:800">🏆 ${getPlayerName(state.winner)} wins!</div>`
+        : isMyTurn
+          ? `<button onclick="sendMove({type:'roll'})" style="padding:12px 28px;background:var(--coral);color:white;border:none;border-radius:12px;font-family:var(--ff-d);font-size:1.1rem;cursor:pointer">🎲 Roll Dice${state.dice?' (last: '+state.dice+')':''}</button>`
+          : `<div style="font-weight:700;color:rgba(26,26,46,.4)">Waiting for ${getPlayerName(state.currentTurn)}…${state.dice?' (rolled '+state.dice+')':''}</div>`}
+    </div>`;
+}
+
+// ── Battleship ───────────────────────────────────────────────────────────────
+function renderBattleshipBoard(root, state) {
+  const myId = getMyId();
+  const oppId = (state.players||[]).find(p => p !== myId);
+  const isMyTurn = state.currentTurn === myId && state.status === 'playing';
+  const myHits = state.hits?.[myId] || []; // hits I've received
+  const oppHits = state.hits?.[oppId] || []; // hits on opponent (my shots)
+  const myBoard = state.boards?.[myId] || [];
+
+  const renderGrid = (hits, myShips, clickable) => {
+    let html = '';
+    for (let r = 0; r < 10; r++) {
+      for (let c = 0; c < 10; c++) {
+        const h = hits?.[r]?.[c];
+        const ship = myShips?.[r]?.[c];
+        const bg = h === 'hit' ? '#E03131' : h === 'miss' ? '#ADB5BD' : ship ? '#4C6EF5' : 'white';
+        const sym = h === 'hit' ? '💥' : h === 'miss' ? '•' : ship ? '🚢' : '';
+        html += `<button data-r="${r}" data-c="${c}"
+          style="aspect-ratio:1;background:${bg};border:1px solid rgba(0,0,0,.08);font-size:.6rem;
+            cursor:${clickable && !h ? 'pointer' : 'not-allowed'}"
+          ${(!clickable || h) ? 'disabled' : ''}>${sym}</button>`;
+      }
+    }
+    return html;
+  };
+
+  root.innerHTML = `
+    <div style="width:min(92vw,540px);margin:0 auto;text-align:center">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:12px">
+        <div>
+          <div style="font-size:11px;font-weight:800;margin-bottom:6px;color:rgba(26,26,46,.5)">YOUR FLEET</div>
+          <div style="display:grid;grid-template-columns:repeat(10,1fr);gap:1px;border:1.5px solid var(--border);border-radius:8px;overflow:hidden">
+            ${renderGrid(myHits, myBoard, false)}
+          </div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:800;margin-bottom:6px;color:${isMyTurn?'var(--coral)':'rgba(26,26,46,.5)'}">${isMyTurn?'🎯 FIRE HERE':'OPPONENT WATERS'}</div>
+          <div id="bsOppGrid" style="display:grid;grid-template-columns:repeat(10,1fr);gap:1px;border:1.5px solid ${isMyTurn?'var(--coral)':'var(--border)'};border-radius:8px;overflow:hidden">
+            ${renderGrid(oppHits, null, isMyTurn)}
+          </div>
+        </div>
+      </div>
+      ${state.sunkShips?.[oppId]?.length ? `<div style="font-size:12px;font-weight:800;color:var(--teal)">Sunk: ${state.sunkShips[oppId].join(', ')}</div>` : ''}
+      ${state.status==='finished'
+        ? `<div style="font-weight:800">${state.winner===myId?'🏆 You sank the fleet!':'💀 Your fleet was sunk!'}</div>`
+        : `<div style="font-size:12px;font-weight:700;color:rgba(26,26,46,.4)">${isMyTurn?'Click the opponent\'s grid to fire!':'Waiting for opponent…'}</div>`}
+    </div>`;
+
+  if (isMyTurn) {
+    root.querySelectorAll('#bsOppGrid button[data-r]').forEach(btn => {
+      btn.addEventListener('click', () => sendMove({ row: Number(btn.dataset.r), col: Number(btn.dataset.c) }));
+    });
+  }
+}
+
+// ── Dots & Boxes ──────────────────────────────────────────────────────────────
+function renderDotsBoxesBoard(root, state) {
+  const myId = getMyId();
+  const isMyTurn = state.currentTurn === myId && state.status === 'playing';
+  const size = state.size || 5;
+  const pColors = {};
+  (state.players||[]).forEach((pid,i) => { pColors[pid] = ['#E03131','#228BE6','#2F9E44','#F59F00'][i]; });
+
+  const cellSize = Math.min(48, Math.floor(300 / size));
+  const dotR = 5;
+  const w = (size) * cellSize + dotR * 2;
+  const h = (size) * cellSize + dotR * 2;
+
+  let svg = `<svg width="${w}" height="${h}" style="overflow:visible">`;
+
+  // Boxes
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      const owner = state.boxes?.[r]?.[c];
+      if (owner) {
+        const x = dotR + c * cellSize, y = dotR + r * cellSize;
+        svg += `<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" fill="${pColors[owner] || '#aaa'}" opacity=".25"/>`;
+      }
+    }
+  }
+
+  // Horizontal lines
+  for (let r = 0; r <= size; r++) {
+    for (let c = 0; c < size; c++) {
+      const owner = state.h?.[r]?.[c];
+      const x1 = dotR + c * cellSize, y1 = dotR + r * cellSize;
+      const x2 = x1 + cellSize;
+      if (owner) {
+        svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y1}" stroke="${pColors[owner]||'#555'}" stroke-width="4" stroke-linecap="round"/>`;
+      } else if (isMyTurn) {
+        svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y1}" stroke="transparent" stroke-width="12" style="cursor:pointer" class="db-line" data-t="h" data-r="${r}" data-c="${c}"/>
+                <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y1}" stroke="#ddd" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 3" pointer-events="none"/>`;
+      } else {
+        svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y1}" stroke="#ddd" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 3"/>`;
+      }
+    }
+  }
+
+  // Vertical lines
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c <= size; c++) {
+      const owner = state.v?.[r]?.[c];
+      const x1 = dotR + c * cellSize, y1 = dotR + r * cellSize;
+      const y2 = y1 + cellSize;
+      if (owner) {
+        svg += `<line x1="${x1}" y1="${y1}" x2="${x1}" y2="${y2}" stroke="${pColors[owner]||'#555'}" stroke-width="4" stroke-linecap="round"/>`;
+      } else if (isMyTurn) {
+        svg += `<line x1="${x1}" y1="${y1}" x2="${x1}" y2="${y2}" stroke="transparent" stroke-width="12" style="cursor:pointer" class="db-line" data-t="v" data-r="${r}" data-c="${c}"/>
+                <line x1="${x1}" y1="${y1}" x2="${x1}" y2="${y2}" stroke="#ddd" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 3" pointer-events="none"/>`;
+      } else {
+        svg += `<line x1="${x1}" y1="${y1}" x2="${x1}" y2="${y2}" stroke="#ddd" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 3"/>`;
+      }
+    }
+  }
+
+  // Dots
+  for (let r = 0; r <= size; r++) {
+    for (let c = 0; c <= size; c++) {
+      svg += `<circle cx="${dotR + c*cellSize}" cy="${dotR + r*cellSize}" r="${dotR}" fill="var(--navy)"/>`;
+    }
+  }
+  svg += `</svg>`;
+
+  const scores = Object.entries(state.scores||{}).map(([pid,s])=>`<span style="color:${pColors[pid]||'#555'};font-weight:800">${getPlayerName(pid)}: ${s}</span>`).join(' · ');
+
+  root.innerHTML = `
+    <div style="width:min(92vw,500px);margin:0 auto;text-align:center">
+      <div style="overflow:auto;margin-bottom:10px">${svg}</div>
+      <div style="font-size:12px;margin-bottom:8px">${scores}</div>
+      <div style="font-size:12px;font-weight:700;color:rgba(26,26,46,.4)">${state.status==='finished'?`Winner: ${getPlayerName(state.winner)}`:isMyTurn?'Click a line to claim it':'Waiting for '+getPlayerName(state.currentTurn)+'…'}</div>
+    </div>`;
+
+  root.querySelectorAll('.db-line').forEach(line => {
+    line.addEventListener('click', () => sendMove({ type: line.dataset.t, row: Number(line.dataset.r), col: Number(line.dataset.c) }));
+  });
 }
 
 function renderTicTacToeBoard(root, state) {
@@ -1804,7 +2232,9 @@ function showFloatingReaction(reaction) {
 }
 
 function getMyId() {
-  return currentUser?.uid || socket?.id || 'unknown';
+  // Prefer the ID we locked in at room join/create time.
+  // Falls back to currentUser uid (if Firebase auth), then socket.id.
+  return myPlayerId || currentUser?.uid || socket?.id || 'unknown';
 }
 
 function getPlayerName(id) {

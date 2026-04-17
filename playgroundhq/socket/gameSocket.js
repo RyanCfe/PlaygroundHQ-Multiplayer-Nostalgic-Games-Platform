@@ -376,10 +376,14 @@ async function executeBotMove(io, code, botPlayer) {
     if (move === null || move === undefined) return;
 
     let moveObj;
-    if (typeof move === 'object') {
+    if (move !== null && typeof move === 'object' && !Array.isArray(move)) {
+      // Already a proper move object (Ludo, Snakes & Ladders, Dots & Boxes, etc.)
       moveObj = move;
+    } else if (Array.isArray(move)) {
+      // Battleship returns [row, col]
+      moveObj = { row: move[0], col: move[1] };
     } else {
-      // map primitive bot outputs to expected engine input
+      // Primitive: map to all named fields so each engine finds what it expects
       moveObj = { index: move, col: move, pit: move, cardIndex: move, letter: move };
     }
 
