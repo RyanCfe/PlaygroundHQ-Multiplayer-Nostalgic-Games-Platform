@@ -585,6 +585,7 @@ main{max-width:1400px;margin:0 auto;padding:2rem 1.5rem 4rem}
 }
 .auth-divider::before,.auth-divider::after{content:'';flex:1;height:1px;background:var(--border)}
 .guest-note{font-size:12px;font-weight:600;color:rgba(26,26,46,.5);text-align:center;margin-top:4px}
+#joinCode{letter-spacing:4px;padding-left:10px}
 
 @media(max-width:900px){
   .gr-sidebar{display:none}
@@ -907,11 +908,29 @@ main{max-width:1400px;margin:0 auto;padding:2rem 1.5rem 4rem}
 <div class="overlay" id="joinModal">
   <div class="modal">
     <button class="modal-close" onclick="closeModal('joinModal')">✕</button>
+
     <div class="modal-title">Join a Room</div>
     <div class="modal-sub">Enter the 6-character code from your friend</div>
-    <input type="text" class="text-input" id="joinCode" placeholder="e.g. KXP-772" maxlength="7"
-      oninput="fmtCode(this)" style="text-align:center;font-family:var(--ff-d);font-size:2rem;letter-spacing:6px">
-    <input type="text" class="text-input" id="joinName" placeholder="Your nickname…" maxlength="20">
+
+    <!-- FIXED INPUT -->
+    <input
+      type="text"
+      class="text-input"
+      id="joinCode"
+      placeholder="ABC-123"
+      maxlength="8"
+      oninput="fmtCode(this)"
+      style="text-align:center;font-family:var(--ff-d);font-size:2rem;letter-spacing:4px;padding-left:10px"
+    >
+
+    <input
+      type="text"
+      class="text-input"
+      id="joinName"
+      placeholder="Your nickname…"
+      maxlength="20"
+    >
+
     <button class="btn-submit" onclick="doJoinRoom()">Join Room →</button>
   </div>
 </div>
@@ -1298,7 +1317,10 @@ function renderGames() {
         </div>
         <div class="gc-actions">
           <button class="btn-play">▶ Play</button>
-          ${g.botSupport ? `<button class="btn-bot-sm" onclick="event.stopPropagation();openBotModal('medium','${g.id}')">🤖</button>` : ''}
+          ${['tictactoe','connect4','battleship','ludo','snakes-ladders','memory-match','hangman','mancala','dots-boxes'].includes(g.id)
+  ? `<button class="btn-bot-sm" onclick="event.stopPropagation();openBotModal('medium','${g.id}')">🤖</button>`
+  : ''
+}
         </div>
       </div>
     </div>
@@ -1414,12 +1436,15 @@ function doCreateRoom() {
 }
 
 function doJoinRoom() {
-  const code = document.getElementById('joinCode').value.trim().toUpperCase();
+  const rawCode = document.getElementById('joinCode').value.trim().toUpperCase();
+  const clean = rawCode.replace(/[^A-Z0-9]/g, '').slice(0, 6);
+  const formattedCode = clean.length > 3 ? clean.slice(0, 3) + '-' + clean.slice(3) : clean;
   const name = document.getElementById('joinName').value.trim() || defaultPlayerName();
-  if (!code || code.length < 5) return toast('Enter a valid room code', 'error');
+
+  if (clean.length < 6) return toast('Enter a valid 6-character room code', 'error');
 
   closeModal('joinModal');
-  quickJoin(code, name);
+  quickJoin(formattedCode, name);
 }
 
 function quickJoin(code, name = defaultPlayerName()) {
@@ -1609,7 +1634,8 @@ function setPSel(el) {
 
 function fmtCode(el) {
   let v = el.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  if (v.length > 3) v = v.slice(0, 3) + '-' + v.slice(3, 6);
+  v = v.slice(0, 6);
+  if (v.length > 3) v = v.slice(0, 3) + '-' + v.slice(3);
   el.value = v;
 }
 
